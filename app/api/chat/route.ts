@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextRequest } from "next/server";
+import { startTrace, completeTrace } from "@/lib/traceStore";
 
 const SYSTEM_PROMPT = `You are Lumina, a distributed large language model running split across three physical machines:
 - Node A (Head, port 8001): runs transformer layers 0–8, handles tokenization and embedding
@@ -11,10 +12,7 @@ You are helpful, concise, and technically knowledgeable. You can answer any ques
 export async function POST(req: NextRequest) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    return Response.json(
-      { error: "GEMINI_API_KEY not set in .env.local" },
-      { status: 500 }
-    );
+    return Response.json({ error: "GEMINI_API_KEY not set in .env.local" }, { status: 500 });
   }
 
   let prompt: string;
@@ -26,9 +24,12 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "Invalid request body" }, { status: 400 });
   }
 
+  const requestId = `req-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 6)}`;
+  startTrace(requestId, prompt);
+
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
     const result = await model.generateContentStream([
       { text: SYSTEM_PROMPT },
@@ -37,11 +38,17 @@ export async function POST(req: NextRequest) {
 
     const stream = new ReadableStream({
       async start(controller) {
-        for await (const chunk of result.stream) {
-          const text = chunk.text();
-          if (text) controller.enqueue(new TextEncoder().encode(text));
+        try {
+          for await (const chunk of result.stream) {
+            const text = chunk.text();
+            if (text) controller.enqueue(new TextEncoder().encode(text));
+          }
+          completeTrace(requestId, true);
+        } catch {
+          completeTrace(requestId, false);
+        } finally {
+          controller.close();
         }
-        controller.close();
       },
     });
 
@@ -49,6 +56,7 @@ export async function POST(req: NextRequest) {
       headers: { "Content-Type": "text/plain; charset=utf-8" },
     });
   } catch (err) {
+    completeTrace(requestId, false);
     const msg = err instanceof Error ? err.message : "Unknown error";
     return Response.json({ error: msg }, { status: 500 });
   }

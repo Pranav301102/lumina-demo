@@ -15,7 +15,6 @@ type Node = {
   ram_percent: number;
   ram_used_gb: number;
   ram_total_gb: number;
-  vram: string;
   latency_ms: number;
   throughput_tps: number;
   active_connections: number;
@@ -27,6 +26,16 @@ type Node = {
 
 type Assignment = { node_id: string; layer_start: number; layer_end: number };
 
+function writeLog(level: "info" | "warn" | "error", message: string, metadata: Record<string, unknown>) {
+  try {
+    const raw = localStorage.getItem("lumina_logs");
+    const logs: unknown[] = raw ? JSON.parse(raw) : [];
+    logs.push({ id: crypto.randomUUID(), timestamp: new Date().toISOString(), level, message, metadata });
+    if (logs.length > 150) logs.splice(0, logs.length - 150);
+    localStorage.setItem("lumina_logs", JSON.stringify(logs));
+  } catch { /* localStorage unavailable */ }
+}
+
 export default function ClusterPage() {
   const [nodes, setNodes] = useState<Node[]>([]);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
@@ -34,15 +43,33 @@ export default function ClusterPage() {
 
   useEffect(() => {
     async function load() {
+      const t0 = Date.now();
       try {
         const [nr, ar] = await Promise.all([
           fetch("/api/nodes").then((r) => r.json()),
           fetch("/api/assignments").then((r) => r.json()),
         ]);
-        setNodes(nr.nodes ?? []);
+        const loadedNodes: Node[] = nr.nodes ?? [];
+        setNodes(loadedNodes);
         setAssignments(ar.assignments ?? []);
-      } catch {
-        // silently continue
+
+        const active = loadedNodes.filter((n) => n.status === "healthy" || n.status === "active").length;
+        const avgLatency = loadedNodes.length
+          ? Math.round(loadedNodes.reduce((s, n) => s + n.latency_ms, 0) / loadedNodes.length)
+          : 0;
+        const avgThroughput = loadedNodes.length
+          ? Math.round(loadedNodes.reduce((s, n) => s + n.throughput_tps, 0) / loadedNodes.length)
+          : 0;
+
+        writeLog("info", "Cluster heartbeat", {
+          activeNodes: active,
+          totalNodes: loadedNodes.length,
+          avgLatency: `${avgLatency} ms`,
+          avgThroughput: `${avgThroughput} tok/s`,
+          pollDuration: `${Date.now() - t0} ms`,
+        });
+      } catch (err) {
+        writeLog("error", "Cluster poll failed", { error: String(err) });
       } finally {
         setLoading(false);
       }
@@ -67,7 +94,6 @@ export default function ClusterPage() {
         <p className="text-muted text-sm mt-1">Live node health, resource usage, and layer assignments.</p>
       </div>
 
-      {/* Summary cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard label="Total Nodes" value={nodes.length} icon={<Server size={16} />} />
         <StatCard label="Active Nodes" value={activeCount} icon={<Zap size={16} />} color="success" />
@@ -75,13 +101,11 @@ export default function ClusterPage() {
         <StatCard label="Avg Latency" value={`${avgLatency} ms`} icon={<HardDrive size={16} />} color="warn" />
       </div>
 
-      {/* Charts */}
       <div className="grid lg:grid-cols-2 gap-4">
         <ThroughputChart nodes={nodes} />
         <LatencyChart nodes={nodes} />
       </div>
 
-      {/* Node table */}
       <div className="bg-card border border-subtle rounded-2xl overflow-hidden">
         <div className="px-5 py-4 border-b border-subtle">
           <h3 className="font-semibold text-heading">Node Tracker</h3>
@@ -93,7 +117,7 @@ export default function ClusterPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-subtle text-muted text-xs">
-                  {["Node ID", "Role", "Status", "CPU", "RAM", "VRAM", "Latency", "Throughput", "Connections", "Layers", "Last Heartbeat"].map((h) => (
+                  {["Node ID", "Role", "Status", "CPU", "RAM", "Latency", "Throughput", "Connections", "Layers", "Last Heartbeat"].map((h) => (
                     <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
                   ))}
                 </tr>
@@ -117,10 +141,12 @@ export default function ClusterPage() {
                         <div className="w-16 h-1.5 bg-subtle rounded-full overflow-hidden">
                           <div className="h-full bg-purple-500 rounded-full" style={{ width: `${n.ram_percent}%` }} />
                         </div>
-                        <span className="text-xs text-muted">{Math.round(n.ram_percent)}%</span>
+                        <span className="text-xs text-muted">
+                          {Math.round(n.ram_percent)}%
+                          <span className="ml-1 opacity-60">({n.ram_used_gb}/{n.ram_total_gb} GB)</span>
+                        </span>
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-muted">{n.vram}</td>
                     <td className="px-4 py-3 text-muted">{Math.round(n.latency_ms)} ms</td>
                     <td className="px-4 py-3 text-muted">{Math.round(n.throughput_tps)} tok/s</td>
                     <td className="px-4 py-3 text-muted">{n.active_connections}</td>
@@ -138,7 +164,6 @@ export default function ClusterPage() {
         )}
       </div>
 
-      {/* Layer assignment */}
       <div className="bg-card border border-subtle rounded-2xl overflow-hidden">
         <div className="px-5 py-4 border-b border-subtle">
           <h3 className="font-semibold text-heading">Layer Assignments</h3>
